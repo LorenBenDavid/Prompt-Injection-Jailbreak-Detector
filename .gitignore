@@ -1,0 +1,24 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Large model files
+models/saved/bert_best/
+models/saved/sentence_transformer/
+models/saved/embedder.pkl
+models/saved/embedding_clf.pkl
+
+# Data (large CSVs)
+data/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Logs & temp
+*.log
+reports/confusion_matrix_*.png
+reports/roc_curve_*.png
