@@ -37,6 +37,17 @@ def analyze(text: str) -> EnsembleResult:
     return get_ensemble().predict(text)
 
 
+def analyze_in_worker(text: str) -> dict:
+    """Runs in a separate process — loads models lazily, returns serializable dict."""
+    global _ensemble
+    if _ensemble is None:
+        import torch
+        torch.set_num_threads(1)
+        load_models()
+    result = get_ensemble().predict(text)
+    return result.to_dict()
+
+
 def analyze_batch(texts: list[str]) -> list[EnsembleResult]:
     ens = get_ensemble()
     return [ens.predict(t) for t in texts]

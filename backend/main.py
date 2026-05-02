@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.analyzer import (
     analyze,
     analyze_batch,
+    analyze_in_worker,
     load_dataset,
     load_gallery,
     load_metrics,
@@ -49,6 +51,8 @@ _stats: dict = {
 
 _models_loaded = False
 _gallery_cache: list[dict] | None = None
+_inference_lock = asyncio.Lock()
+_process_pool: ProcessPoolExecutor | None = None
 
 
 async def _precompute_gallery() -> None:
@@ -62,16 +66,17 @@ async def _precompute_gallery() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _models_loaded
+    global _models_loaded, _process_pool
     try:
         load_models()
         _models_loaded = True
-        import torch
-        torch.set_num_threads(2)
+        _process_pool = ProcessPoolExecutor(max_workers=1)
         log.info("Models loaded successfully.")
     except Exception as exc:
         log.error("Startup error: %s", exc)
     yield
+    if _process_pool:
+        _process_pool.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -117,6 +122,34 @@ def _ensemble_result_to_response(text: str, result) -> AnalyzeResponse:
     )
 
 
+def _dict_to_response(text: str, d: dict) -> AnalyzeResponse:
+    layers_d = d["layers"]
+    h = layers_d["heuristic"]
+    e = layers_d["embedding"]
+    b = layers_d["bert"]
+    layers = LayerScores(
+        heuristic_score=h["score"],
+        heuristic_triggered_rules=h["triggered_rules"],
+        heuristic_latency_ms=h["latency_ms"],
+        embedding_score=e["score"],
+        embedding_nearest_attacks=e.get("nearest_attacks", []),
+        embedding_latency_ms=e["latency_ms"],
+        bert_score=b["score"],
+        bert_shap_tokens=[ShapToken(token=t["token"], importance=t["importance"]) for t in (b.get("shap_tokens", [])[:10])],
+        bert_latency_ms=b["latency_ms"],
+    )
+    return AnalyzeResponse(
+        text=text[:500],
+        is_attack=d["is_attack"],
+        risk_level=d["risk_level"],
+        ensemble_score=d["ensemble_score"],
+        short_circuited=d["short_circuited"],
+        explanation=d["explanation"],
+        layers=layers,
+        total_latency_ms=d["latency_ms"],
+    )
+
+
 def _update_stats(result: AnalyzeResponse) -> None:
     _stats["total_analyzed"] += 1
     if result.is_attack:
@@ -135,8 +168,10 @@ def _update_stats(result: AnalyzeResponse) -> None:
 async def api_analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     if not _models_loaded:
         raise HTTPException(status_code=503, detail="Models not loaded")
-    result = await asyncio.to_thread(analyze, request.text)
-    response = _ensemble_result_to_response(request.text, result)
+    loop = asyncio.get_event_loop()
+    async with _inference_lock:
+        result_dict = await loop.run_in_executor(_process_pool, analyze_in_worker, request.text)
+    response = _dict_to_response(request.text, result_dict)
     _update_stats(response)
     return response
 
