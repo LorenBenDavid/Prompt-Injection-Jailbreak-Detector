@@ -62,7 +62,12 @@
       "Bash(kill -SIGINFO 96272)",
       "Bash(kill -SIGTERM 96272)",
       "Bash(kill -9 96272)",
-      "Bash(kill -9 98582)"
+      "Bash(kill -9 98582)",
+      "Bash(kill -9 1545)",
+      "Bash(kill -9 4826)",
+      "Bash(kill -9 5817)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }
