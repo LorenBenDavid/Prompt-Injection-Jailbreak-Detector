@@ -46,7 +46,7 @@ ROLEPLAY_PATTERNS: list[str] = [
 
 ENCODING_PATTERNS: list[str] = [
     r"[A-Za-z0-9+/]{20,}={0,2}",   # base64-like blobs
-    r"(\b[a-z]+\b.*){2,}[0-9]{3,}",  # excessive leet-speak digit substitutions
+    r"(?:[a-z0-9]{2,}[0-9]){3,}",   # leet-speak digit substitutions (safe, no backtracking)
     r"decode\s+this\s*:",
     r"translate\s+and\s+execute",
     r"[A-Za-z]{2,}-[0-9]{2,}",      # ROT13-style markers

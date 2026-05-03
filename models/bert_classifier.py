@@ -165,7 +165,9 @@ class BertClassifier:
     def load(self) -> None:
         """Load best saved model from disk."""
         self.tokenizer = DistilBertTokenizerFast.from_pretrained(BERT_BEST_PATH)
-        self.model = DistilBertForSequenceClassification.from_pretrained(BERT_BEST_PATH).to(self.device)
+        self.model = DistilBertForSequenceClassification.from_pretrained(
+            BERT_BEST_PATH, attn_implementation="eager"
+        ).to(self.device)
         self.model.eval()
 
     def predict(self, text: str) -> BertResult:
@@ -206,31 +208,35 @@ class BertClassifier:
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> list[dict]:
-        """Approximate token importance via input × gradient."""
+        """Token importance via mean attention weights — no backward pass, always fast."""
         assert self.model is not None and self.tokenizer is not None
 
-        self.model.eval()
-        embeds = self.model.distilbert.embeddings(input_ids)
-        embeds.retain_grad()
+        try:
+            with torch.no_grad():
+                out = self.model.distilbert(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_attentions=True,
+                )
 
-        logits = self.model(inputs_embeds=embeds, attention_mask=attention_mask).logits
-        attack_logit = logits[0, 1]
-        attack_logit.backward()
+            if not out.attentions:
+                return []
 
-        if embeds.grad is None:
+            # attentions: tuple of (1, heads, seq, seq) per layer
+            # average across layers & heads, use CLS row as token salience
+            attn = torch.stack(out.attentions).squeeze(1)  # (layers, heads, seq, seq)
+            salience = attn.mean(dim=[0, 1])[0]             # CLS row → (seq,)
+            salience = salience.cpu().tolist()
+
+            tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0].cpu().tolist())
+            result = []
+            for tok, imp in zip(tokens, salience):
+                if tok in ("[CLS]", "[SEP]", "[PAD]"):
+                    continue
+                result.append({"token": tok, "importance": float(imp)})
+            return result
+        except Exception:
             return []
-
-        grad = embeds.grad[0].cpu().numpy()          # (seq_len, hidden)
-        emb_val = embeds[0].detach().cpu().numpy()   # (seq_len, hidden)
-        importance = (grad * emb_val).sum(axis=-1)   # integrated gradient approx
-
-        tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0].cpu().tolist())
-        result = []
-        for tok, imp in zip(tokens, importance):
-            if tok in ("[CLS]", "[SEP]", "[PAD]"):
-                continue
-            result.append({"token": tok, "importance": float(imp)})
-        return result
 
     def generate_shap_report(self, val_path: Path, n: int = 100) -> None:
         """Run token importance on n val samples and save to reports/shap_values.json."""
