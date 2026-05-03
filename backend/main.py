@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.analyzer import (
     analyze,
     analyze_batch,
-    analyze_in_worker,
     load_dataset,
     load_gallery,
     load_metrics,
@@ -52,31 +55,20 @@ _stats: dict = {
 _models_loaded = False
 _gallery_cache: list[dict] | None = None
 _inference_lock = asyncio.Lock()
-_process_pool: ProcessPoolExecutor | None = None
-
-
-async def _precompute_gallery() -> None:
-    global _gallery_cache
-    try:
-        _gallery_cache = await asyncio.to_thread(load_gallery, 20)
-        log.info("Gallery pre-computed (%d items).", len(_gallery_cache))
-    except Exception as exc:
-        log.warning("Gallery pre-computation failed: %s", exc)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _models_loaded, _process_pool
+    global _models_loaded
     try:
         load_models()
+        import torch
+        torch.set_num_threads(1)
         _models_loaded = True
-        _process_pool = ProcessPoolExecutor(max_workers=1)
         log.info("Models loaded successfully.")
     except Exception as exc:
         log.error("Startup error: %s", exc)
     yield
-    if _process_pool:
-        _process_pool.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -168,10 +160,9 @@ def _update_stats(result: AnalyzeResponse) -> None:
 async def api_analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     if not _models_loaded:
         raise HTTPException(status_code=503, detail="Models not loaded")
-    loop = asyncio.get_event_loop()
     async with _inference_lock:
-        result_dict = await loop.run_in_executor(_process_pool, analyze_in_worker, request.text)
-    response = _dict_to_response(request.text, result_dict)
+        result = await asyncio.to_thread(analyze, request.text)
+    response = _ensemble_result_to_response(request.text, result)
     _update_stats(response)
     return response
 
